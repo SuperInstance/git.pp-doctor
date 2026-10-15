@@ -104,12 +104,12 @@ def record_leaf(record: Dict[str, Any]) -> str:
     canon = _canonicalize(record)
     # Python's json.dumps with sort_keys, ensure_ascii, the canonical
     # separators is what the hub pins:
-    #   json.dumps(x, sort_keys=True, ensure_ascii=True,
+    #   json.dumps(x, sort_keys=True, ensure_ascii=False,
     #              separators=(", ", ": "))
     payload = json.dumps(
         canon,
         sort_keys=True,
-        ensure_ascii=True,
+        ensure_ascii=False,
         separators=(", ", ": "),
     )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
