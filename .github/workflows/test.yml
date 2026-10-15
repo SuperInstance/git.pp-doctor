@@ -1,0 +1,43 @@
+name: doctor
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Fetch live records
+        run: |
+          curl -sS https://gitpp.superinstance.dev/api/records?project=poc-quilt-1 > poc.json
+          jq '.records' poc.json > records.json
+      - name: Compute closure root at task-c
+        run: |
+          ROOT=$(python3 gitpp_doctor.py root records.json --at task-c | jq -r .closureRoot)
+          echo "Computed: $ROOT"
+          if [ "$ROOT" != "60effe23970d8a5cc837636c44685502361288c1f00577e9addfa10cbd4fc91d" ]; then
+            echo "FAIL: closure root drift"
+            exit 1
+          fi
+      - name: Three-way check VERIFIED
+        run: |
+          LIVE_STATE=$(curl -sS "https://gitpp.superinstance.dev/api/state?project=poc-quilt-1" | jq -c .state)
+          python3 gitpp_doctor.py check records.json \
+            --at task-c \
+            --expected 60effe23970d8a5cc837636c44685502361288c1f00577e9addfa10cbd4fc91d \
+            --expected-state "$LIVE_STATE"
+      - name: Fold replay
+        run: |
+          python3 gitpp_doctor.py fold records.json | tee fold-output.json
+          # Verify the state is byte-identical to the live state
+          curl -sS "https://gitpp.superinstance.dev/api/state?project=poc-quilt-1" | jq -S .state > live-state.json
+          jq -S .state fold-output.json > folded-state.json
+          diff live-state.json folded-state.json || (echo "FAIL: state drift" && exit 1)
