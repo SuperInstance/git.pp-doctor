@@ -297,6 +297,171 @@ def derive(records: List[Dict[str, Any]]) -> Dict[str, Any]:
 
 # ---------- doctor commands ----------
 
+def cmd_compare(args: argparse.Namespace) -> int:
+    """Compare two record sets: closure roots at <at>, derived states, deltas.
+
+    Useful for: "what changed between the last pinned checkpoint and the
+    current set?" Reports a structured diff, not a yes/no answer.
+    """
+    rec_a = _load_records_arg(args.file_a)
+    rec_b = _load_records_arg(args.file_b)
+
+    # Closure roots
+    root_a = closure_root(rec_a, args.at)
+    root_b = closure_root(rec_b, args.at)
+
+    # Derived states
+    state_a = derive(rec_a)["state"]
+    state_b = derive(rec_b)["state"]
+
+    # Order
+    order_a = [r for r in derive(rec_a)["order"]]
+    order_b = [r for r in derive(rec_b)["order"]]
+
+    # Conflicts
+    conflicts_a = derive(rec_a)["conflicts"]
+    conflicts_b = derive(rec_b)["conflicts"]
+
+    # State diff
+    only_a = {k: state_a[k] for k in state_a if k not in state_b or state_a[k] != state_b.get(k)}
+    only_b = {k: state_b[k] for k in state_b if k not in state_a or state_b[k] != state_a.get(k)}
+
+    # Order diff
+    only_order_a = [r for r in order_a if r not in order_b]
+    only_order_b = [r for r in order_b if r not in order_a]
+
+    # Conflict diff
+    only_conflicts_a = [c for c in conflicts_a if c not in conflicts_b]
+    only_conflicts_b = [c for c in conflicts_b if c not in conflicts_a]
+
+    out = {
+        "at": args.at,
+        "a": args.file_a,
+        "b": args.file_b,
+        "root": {
+            "a": root_a,
+            "b": root_b,
+            "match": root_a == root_b,
+        },
+        "state": {
+            "onlyInA": only_a,
+            "onlyInB": only_b,
+            "match": only_a == {} and only_b == {},
+        },
+        "order": {
+            "onlyInA": only_order_a,
+            "onlyInB": only_order_b,
+            "match": only_order_a == [] and only_order_b == [],
+        },
+        "conflicts": {
+            "onlyInA": only_conflicts_a,
+            "onlyInB": only_conflicts_b,
+            "match": only_conflicts_a == [] and only_conflicts_b == [],
+        },
+    }
+    # If the user provided --expected, also report that
+    if args.expected:
+        out["expected"] = args.expected
+        out["expectedMatchA"] = (root_a == args.expected)
+        out["expectedMatchB"] = (root_b == args.expected)
+    print(json.dumps(out, indent=2))
+    # Exit code: 0 if everything matches, 1 if anything differs
+    if (out["root"]["match"] and out["state"]["match"]
+            and out["order"]["match"] and out["conflicts"]["match"]):
+        return 0
+    return 1
+
+
+def cmd_explain(args: argparse.Namespace) -> int:
+    """Explain a record set: closure, leaves, state, conflicts, root.
+
+    Useful for: "what does this record set derive to, and why?"
+    Shows the closure in topo order, each record's leaf hash, the
+    derived state with each key's setter, the conflicts, and the
+    closure root.
+    """
+    records = _load_records(args)
+    at = args.at
+    root = closure_root(records, at)
+    derived = derive(records)
+
+    # Compute the closure (topo order)
+    by_id = {r["id"]: r for r in records if r.get("id")}
+    if at not in by_id:
+        print(json.dumps({"ok": False, "reason": f"record '{at}' not found in set"}, indent=2))
+        return 4
+    seen = set()
+    stack = [at]
+    closure = []
+    while stack:
+        cur = stack.pop()
+        if cur in seen:
+            continue
+        if cur not in by_id:
+            print(json.dumps({"ok": False, "reason": f"closure incomplete: parent '{cur}' missing", "at": at}, indent=2))
+            return 4
+        seen.add(cur)
+        closure.append(cur)
+        for p in by_id[cur].get("parents", []) or []:
+            if p not in seen:
+                stack.append(p)
+
+    # Build per-record leaf and setter info
+    by_id_in_closure = {rid: by_id[rid] for rid in closure}
+    closure_records = []
+    for rid in sorted(closure, key=lambda x: [ord(c) for c in x]):
+        r = by_id_in_closure[rid]
+        leaf = record_leaf(r)
+        setters = [(k, derived["order"].index(s) if s in derived["order"] else -1, s)
+                    for k, s in [] if False]  # placeholder; we use derived['state'] lookup below
+        # Find which keys this record set in the derived state
+        keys_set = []
+        for k, v in derived["state"].items():
+            # Walk the order: if applying this record would have set the key,
+            # and the key's value matches this record's effect, then yes.
+            # Simpler: check that this record's effects match a state key.
+            for ek, ev in (r.get("effects") or {}).items():
+                if ek == k and ev == v:
+                    keys_set.append(k)
+        closure_records.append({
+            "id": rid,
+            "kind": r.get("kind"),
+            "parents": sorted(r.get("parents", []) or [], key=lambda x: [ord(c) for c in x]),
+            "effects": r.get("effects", {}),
+            "leaf": leaf,
+            "sets": keys_set,
+        })
+
+    # Identify the setter for each state key
+    setters = {}
+    for k in derived["state"]:
+        for rid in derived["order"]:
+            r = by_id[rid]
+            for ek, ev in (r.get("effects") or {}).items():
+                if ek == k:
+                    setters[k] = rid
+                    break
+            if k in setters:
+                break
+
+    state_with_setters = {k: {"value": v, "setBy": setters.get(k)} for k, v in derived["state"].items()}
+
+    out = {
+        "ok": True,
+        "at": at,
+        "closure": closure,
+        "closureRoot": root,
+        "closureRecords": closure_records,
+        "state": derived["state"],
+        "stateWithSetters": state_with_setters,
+        "order": derived["order"],
+        "conflicts": derived["conflicts"],
+        "orphans": sorted(list(derived["orphans"])),
+    }
+    print(json.dumps(out, indent=2))
+    return 0
+
+
 def cmd_root(args: argparse.Namespace) -> int:
     records = _load_records(args)
     root = closure_root(records, args.at)
@@ -379,18 +544,21 @@ def _state_diff(a: Dict[str, Any], b: Dict[str, Any]) -> Dict[str, Any]:
     return {"onlyInFolded": only_a, "onlyInExpected": only_b}
 
 
-def _load_records(args: argparse.Namespace) -> List[Dict[str, Any]]:
-    if args.file and args.file != "-":
-        with open(args.file) as f:
+def _load_records_arg(filename: str) -> List[Dict[str, Any]]:
+    if filename and filename != "-":
+        with open(filename) as f:
             data = json.load(f)
     else:
         data = json.load(sys.stdin)
-    # Accept either a bare list or a {"records": [...]} envelope.
     if isinstance(data, dict) and "records" in data:
         return data["records"]
     if isinstance(data, list):
         return data
     raise ValueError("input must be a JSON list of records or {'records': [...]}")
+
+
+def _load_records(args: argparse.Namespace) -> List[Dict[str, Any]]:
+    return _load_records_arg(args.file)
 
 
 # ---------- CLI ----------
@@ -403,6 +571,16 @@ def main(argv: Optional[List[str]] = None) -> int:
     pp.add_argument("--at", required=True, help="record id to root at")
     pp.add_argument("--expected", help="pinned root to compare against")
     pp.set_defaults(func=cmd_root)
+    pex = sub.add_parser("explain", help="explain a record set: closure, leaves, state, conflicts, root")
+    pex.add_argument("file")
+    pex.add_argument("--at", required=True, help="record id to root at")
+    pex.set_defaults(func=cmd_explain)
+    pcm = sub.add_parser("compare", help="compare two record sets: roots, states, orders, conflicts")
+    pcm.add_argument("file_a", help="first record-set JSON file")
+    pcm.add_argument("file_b", help="second record-set JSON file")
+    pcm.add_argument("--at", required=True, help="record id to root at (used for the closure)")
+    pcm.add_argument("--expected", help="(optional) pinned root to also report match for A and B")
+    pcm.set_defaults(func=cmd_compare)
     pc = sub.add_parser("check", help="three-way check (VERIFIED/STATE-ONLY/MISMATCH)")
     pc.add_argument("file")
     pc.add_argument("--at", required=True)
