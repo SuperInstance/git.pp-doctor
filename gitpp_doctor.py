@@ -262,7 +262,12 @@ def derive(records: List[Dict[str, Any]]) -> Dict[str, Any]:
         anc = {r["id"]: ancestors_of(r["id"]) for r in top}
         survivors = []
         for r in top:
-            dominated = any(other["id"] in anc[r["id"]] for other in top if other["id"] != r["id"])
+            # Per spec §5.2: a candidate is DOMINATED if it is a (transitive)
+            # ANCESTOR of another candidate at the same class. Survivors are
+            # the most-derived. (This is the inverse of the wrong test
+            # "other is an ancestor of r", which selected the OLDEST record
+            # in the chain instead of the newest — see gitpp-doctor v0.2.2.)
+            dominated = any(r["id"] in anc[other["id"]] for other in top if other["id"] != r["id"])
             if not dominated:
                 survivors.append(r)
         # Tie-break
