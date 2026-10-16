@@ -182,7 +182,7 @@ def closure_root(records: List[Dict[str, Any]], at: str) -> Optional[str]:
 # for validating the substrate, not for running the production system.
 
 def derive(records: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """Return {state, order, conflicts, orphans} for a record set, following
+    """Return {state, setters, order, conflicts, orphans} for a record set, following
     DESIGN.md's resolution rules. Float64 numbers, unicode-codepoint id
     ordering, Kahn-with-smallest-id-first, class-precedence override>task>witness,
     ancestry reduction, cleanest-chain tie-break, conflict losers preserved."""
@@ -253,6 +253,12 @@ def derive(records: List[Dict[str, Any]]) -> Dict[str, Any]:
     # Tie-break: most intent ancestors, fewest witness ancestors, smallest id.
     CLASS = {"override": 3, "task": 2, "witness": 1}
     state: Dict[str, Any] = {}
+    # Spec §5.6: who set each key. The fold already knows this and used to
+    # discard it, leaving provenance visible only where two records happened
+    # to contest the key. That made a same-class nudge unreliable: a nudge
+    # parented on the wrong record lands or is silently discarded depending
+    # only on whether its own id sorts before the winner's.
+    setters: Dict[str, str] = {}
     conflicts: List[Dict[str, Any]] = []
     # All keys touched
     keys: set = set()
@@ -309,6 +315,7 @@ def derive(records: List[Dict[str, Any]]) -> Dict[str, Any]:
         winner = survivors[0]
         winner_value = winner["effects"][K]
         state[K] = winner_value
+        setters[K] = winner["id"]
         distinct_values = {r["effects"][K] for r in candidates}
         if len(distinct_values) > 1:
             losers = sorted(
@@ -319,6 +326,7 @@ def derive(records: List[Dict[str, Any]]) -> Dict[str, Any]:
                 conflicts.append({"key": K, "winner": winner["id"], "losers": losers})
     return {
         "state": state,
+        "setters": setters,
         "order": order,
         "conflicts": conflicts,
         "orphans": sorted(orphans, key=lambda s: [ord(c) for c in s]),
