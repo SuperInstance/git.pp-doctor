@@ -54,20 +54,25 @@ def _float64_canonical(v: float) -> float:
 
 def _leaf_number(v: Any) -> Any:
     """Render one number to the canonical form both ports compute identically.
-    See CHECKPOINT-V2.md 'leaf-number encoding'."""
+    See spec §3 'leaf-number encoding'.
+
+    Integer form requires |v| < 1e16 to fit safely in int64 across all 5
+    ports. Values that would overflow int64 (Python's arbitrary-precision
+    ints would otherwise emit 21-digit numbers C# and C cannot produce)
+    fall back to scientific notation, matching what the other 4 ports emit.
+    """
     if isinstance(v, bool):
         return v  # bool is a kind of int in Python; preserve as bool
     if isinstance(v, int):
-        # integral: exact integer digits via int()
         return int(v)
     if isinstance(v, float):
         v = _float64_canonical(v)
-        if v.is_integer():
+        if v.is_integer() and abs(v) < 1e16:
             return int(v)
-        # Non-integral: rely on Python's repr (shortest round-trip) which is
-        # what json.dumps will use anyway.
+        # Non-integral or |v| >= 1e16: rely on Python's repr (shortest
+        # round-trip), which is what json.dumps will use anyway.
         return v
-    return v  # strings, booleans, etc. pass through
+    return v
 
 
 def _canonicalize(record: Dict[str, Any]) -> Dict[str, Any]:
