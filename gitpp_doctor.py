@@ -69,8 +69,12 @@ def _leaf_number(v: Any) -> Any:
         v = _float64_canonical(v)
         if v.is_integer() and abs(v) < 1e16:
             return int(v)
-        # Non-integral or |v| >= 1e16: rely on Python's repr (shortest
-        # round-trip), which is what json.dumps will use anyway.
+        # Either non-integral, or integral with |v| >= 1e16 (scientific per
+        # the spec). Python's repr() gives the spec's answer for the
+        # non-integral case; for the large-integral case repr() prints integer
+        # digits, but that path is unreachable because json.load(..., parse_int=float)
+        # already put every JSON number in the float64 domain. See
+        # gitpp_doctor.load_records for why that matters.
         return v
     return v
 
@@ -103,6 +107,22 @@ def _canonicalize(record: Dict[str, Any]) -> Dict[str, Any]:
         "reason": record.get("reason"),
     }
 
+
+
+def loads(text: str) -> Any:
+    """json.loads with every number in the float64 domain.
+
+    Spec SS2/SS3 put all JSON numbers in the float64 domain. Python's json
+    module does not: a bare integer literal decodes to an arbitrary-precision
+    `int`, so {"x": 724818294626474393600} arrived as an int and was emitted
+    as integer digits, while js/cs/c/pl/C all decoded it as a float64 and
+    emitted `7.248182946264744e+20` (|v| >= 1e16 is scientific per SS3).
+
+    That value is one of the spec's own targeted splitters, and the 1000/1000
+    cross-port run missed it only because the sample never reached its index.
+    parse_int=float closes the gap. (gitpp-doctor v0.2.3)
+    """
+    return json.loads(text, parse_int=float)
 
 def record_leaf(record: Dict[str, Any]) -> str:
     """SHA-256 hex of the record's leaf, lowercase."""
@@ -557,9 +577,9 @@ def _state_diff(a: Dict[str, Any], b: Dict[str, Any]) -> Dict[str, Any]:
 def _load_records_arg(filename: str) -> List[Dict[str, Any]]:
     if filename and filename != "-":
         with open(filename) as f:
-            data = json.load(f)
+            data = loads(f.read())
     else:
-        data = json.load(sys.stdin)
+        data = loads(sys.stdin.read())
     if isinstance(data, dict) and "records" in data:
         return data["records"]
     if isinstance(data, list):
