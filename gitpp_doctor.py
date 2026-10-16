@@ -316,7 +316,11 @@ def derive(records: List[Dict[str, Any]]) -> Dict[str, Any]:
         winner_value = winner["effects"][K]
         state[K] = winner_value
         setters[K] = winner["id"]
-        distinct_values = {r["effects"][K] for r in candidates}
+        # A dict/list value is unhashable, so a set literal raises TypeError
+        # and the whole fold dies. Compare canonically instead: json.dumps with
+        # sorted keys is a faithful structural key for any JSON value.
+        distinct_values = {json.dumps(r["effects"][K], sort_keys=True, ensure_ascii=False)
+                           for r in candidates}
         if len(distinct_values) > 1:
             losers = sorted(
                 [r["id"] for r in candidates if r["id"] != winner["id"] and r["effects"][K] != winner_value],
