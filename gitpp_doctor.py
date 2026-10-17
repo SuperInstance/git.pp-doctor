@@ -79,26 +79,38 @@ def _leaf_number(v: Any) -> Any:
     return v
 
 
+
+def _canon_value(v: Any) -> Any:
+    """Leaf-number-encode every scalar inside v, at any depth.
+
+    _leaf_number only handles scalars; it returns containers unchanged. So a
+    one-level recursion silently exempts every number below the first object
+    or array from the §3 rules.
+    """
+    if isinstance(v, dict):
+        return {k: _canon_value(x) for k, x in v.items()}
+    if isinstance(v, list):
+        return [_canon_value(x) for x in v]
+    return _leaf_number(v)
+
+
 def _canonicalize(record: Dict[str, Any]) -> Dict[str, Any]:
     """Build the leaf-normalized form of a record (CHECKPOINT-V2.md §'Record leaf')."""
     parents = list(record.get("parents", []) or [])
     # parents is a set: sort by Unicode code point
     parents_sorted = sorted(parents, key=lambda s: [ord(c) for c in str(s)])
     effects_raw = record.get("effects", {}) or {}
-    # effects: same shape as input, but numbers leaf-number-encoded
-    effects_canon: Dict[str, Any] = {}
-    for k in sorted(effects_raw.keys()):
-        v = effects_raw[k]
-        if isinstance(v, dict):
-            # nested effects: recurse over the dict
-            inner = {}
-            for ik in sorted(v.keys()):
-                inner[ik] = _leaf_number(v[ik])
-            effects_canon[k] = inner
-        elif isinstance(v, list):
-            effects_canon[k] = [_leaf_number(x) for x in v]
-        else:
-            effects_canon[k] = _leaf_number(v)
+    # effects: same shape as input, but EVERY number leaf-number-encoded, at
+    # ANY depth.
+    #
+    # The previous version recursed exactly ONE level: a dict's values went
+    # through _leaf_number, but _leaf_number passes containers straight
+    # through, so a float inside a nested dict or list was never converted.
+    # {"a": {"b": 6147559639.0}} emitted 6147559639.0 where every other port
+    # emits 6147559639. Found by the first full-corpus leaf run (20,043
+    # records) -- no 500-record sample had ever reached the nested-object
+    # band. (gitpp-doctor v0.2.6)
+    effects_canon: Dict[str, Any] = {k: _canon_value(effects_raw[k]) for k in sorted(effects_raw.keys())}
     return {
         "id": str(record.get("id", "")),
         "parents": [str(p) for p in parents_sorted],
